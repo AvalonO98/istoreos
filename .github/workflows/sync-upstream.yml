@@ -1,0 +1,31 @@
+name: 自动同步官方iStoreOS代码
+on:
+  schedule:
+    # 每天凌晨2点自动同步（UTC时间，对应北京时间上午10点）
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # 支持手动触发同步
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 必须有写入权限才能推送代码
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # 必须拉取完整历史记录才能同步
+
+      - name: 同步上游所有分支和标签
+        uses: repo-sync/github-sync@v2
+        with:
+          # 官方iStoreOS仓库地址
+          source_repo: "https://github.com/istoreos/istoreos.git"
+          # 同步所有分支（*表示全部）
+          source_branch: "*"
+          # 同步所有标签
+          sync_tags: true
+          # 强制同步（覆盖本地分支，确保和上游完全一致）
+          force: true
+          # GitHub自动生成的令牌，无需手动创建
+          github_token: ${{ secrets.GITHUB_TOKEN }}
