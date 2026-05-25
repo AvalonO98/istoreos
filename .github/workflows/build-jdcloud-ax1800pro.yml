@@ -19,6 +19,10 @@ on:
           - full
           - minimal
 
+env:
+  # 强制使用Node.js 24，提前消除警告并适配6月16日的默认切换
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -26,7 +30,8 @@ jobs:
       contents: write
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        # 升级到v5，原生支持Node.js 24（v4使用Node.js 20已弃用）
+        uses: actions/checkout@v5
         with:
           ref: ${{ inputs.branch }}
           fetch-depth: 1
@@ -81,7 +86,7 @@ jobs:
           
           # 自动补全所有默认配置
           make defconfig
-          
+
       - name: 预下载源码包
         run: make download -j8 V=s
 
