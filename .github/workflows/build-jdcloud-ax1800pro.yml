@@ -54,11 +54,15 @@ jobs:
           sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
           gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
           file wget curl python3-pip libelf-dev ccache
+          ccache --max-size 2G
 
       - name: 添加 iStoreOS 应用商店源
         run: |
           # 添加 iStoreOS 官方 feeds
           echo "src-git istore https://github.com/istoreos/istore-packages.git" >> feeds.conf.default
+
+          # 添加 kenzok8 包源（含 luci-app-turboacc 等网络组件）
+          echo "src-git small https://github.com/kenzok8/small-package.git" >> feeds.conf.default
           
           # 更新并安装所有 feeds
           ./scripts/feeds update -a
@@ -119,22 +123,27 @@ jobs:
 
       - name: 预下载所有源码包
         run: |
-          make download -j8
-          if [ $? -ne 0 ]; then
+          if ! make download -j8; then
             echo "⚠️  部分源码包下载失败，正在单线程重试..."
             make download -j1
           fi
 
       - name: 开始编译
         run: |
-          # GitHub Actions 2核7G内存，使用2线程编译
-          make -j2 V=s
-          
-          if [ $? -ne 0 ]; then
-            echo "❌ 编译失败！"
-            echo "最后100行编译日志："
-            tail -n 100 build_dir/target-*/linux-ipq60xx_generic/linux-*/.config
-            exit 1
+          if ! make -j2 V=s; then
+            exit_code=$?
+            echo "❌ 编译失败（退出码: $exit_code）！"
+            echo "=== 最近的编译日志 ==="
+            find build_dir -maxdepth 3 -name "*.log" -type f 2>/dev/null | head -5 | while read log; do
+              echo "--- $log ---"
+              tail -50 "$log"
+            done
+            # 若无日志文件，显示 kernel 配置状态
+            if [ -f .config ]; then
+              echo "=== 设备配置 ==="
+              grep "CONFIG_TARGET.*ipq60xx\|CONFIG_TARGET.*DEVICE_jdcloud" .config
+            fi
+            exit $exit_code
           fi
 
       - name: 检查并整理固件
@@ -142,17 +151,14 @@ jobs:
           mkdir -p output
           
           # 查找所有京东云亚瑟的固件文件
-          FIRMWARE_FILES=$(find bin/targets/ipq60xx/generic/ -name "*jdcloud_re-ss-01*squashfs*.bin")
-          
-          if [ -z "$FIRMWARE_FILES" ]; then
+          COUNT=$(find bin/targets/ipq60xx/generic/ -name "*jdcloud_re-ss-01*squashfs*.bin" -exec cp {} output/ \; -print | wc -l)
+
+          if [ "$COUNT" -eq 0 ]; then
             echo "❌ 没有找到生成的固件文件！"
             echo "bin目录下的所有bin文件："
             find bin/ -type f -name "*.bin"
             exit 1
           fi
-          
-          # 复制固件到输出目录
-          cp $FIRMWARE_FILES output/
           
           # 生成编译信息文件
           cd output
