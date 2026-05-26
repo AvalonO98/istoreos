@@ -19,10 +19,12 @@ on:
           - full
           - minimal
   repository_dispatch:
-    types: [sync-completed]  # 监听同步完成事件
+    types: [sync-completed]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # 开启详细编译日志
+  V: s
 
 jobs:
   build:
@@ -47,6 +49,15 @@ jobs:
           ref: ${{ steps.params.outputs.branch }}
           fetch-depth: 0
 
+      - name: 检查系统资源
+        run: |
+          echo "=== CPU 信息 ==="
+          lscpu | grep -E 'CPU\(s\)|Thread\(s\) per core|Core\(s\) per socket'
+          echo "=== 内存信息 ==="
+          free -h
+          echo "=== 磁盘信息 ==="
+          df -h
+
       - name: 安装编译依赖
         run: |
           sudo apt update -y
@@ -59,7 +70,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 生成京东云亚瑟配置文件
+      - name: 验证配置文件
         run: |
           cat > .config << EOF
           CONFIG_TARGET_ipq60xx=y
@@ -73,7 +84,7 @@ jobs:
           CONFIG_PACKAGE_luci-app-istorex=y
           CONFIG_PACKAGE_luci-app-dockerman=y
           
-          # Docker 支持（解决 operation not supported 错误）
+          # Docker 支持
           CONFIG_PACKAGE_kmod-docker=y
           CONFIG_PACKAGE_kmod-overlay=y
           CONFIG_PACKAGE_kmod-br-netfilter=y
@@ -91,25 +102,50 @@ jobs:
           CONFIG_PACKAGE_luci-app-ddns=y
           EOF
           
+          # 验证配置并补全默认值
           make defconfig
+          
+          # 检查目标设备是否正确配置
+          echo "=== 目标设备配置 ==="
+          grep -E 'CONFIG_TARGET_ipq60xx|CONFIG_TARGET.*DEVICE_jdcloud' .config
 
-      - name: 预下载源码包
-        run: make download -j8 V=s
-
-      - name: 开始编译
-        run: make -j$(nproc) V=s
-
-      - name: 列出所有生成的固件文件（调试用）
+      - name: 预下载所有源码包
         run: |
-          echo "=== bin/targets/ipq60xx/generic 目录下的所有文件 ==="
-          ls -la bin/targets/ipq60xx/generic/
+          make download -j8
+          # 检查是否有下载失败的包
+          if [ $? -ne 0 ]; then
+            echo "❌ 源码包下载失败，正在重试..."
+            make download -j4
+          fi
+
+      - name: 开始编译（单线程，避免内存不足）
+        run: |
+          # 先使用单线程编译，避免GitHub Actions内存不足导致失败
+          make -j1 V=s
+          
+          # 检查编译是否成功
+          if [ $? -ne 0 ]; then
+            echo "❌ 编译失败！"
+            exit 1
+          fi
+
+      - name: 检查生成的固件文件
+        run: |
+          echo "=== 所有生成的目标文件 ==="
+          find bin/ -type f -name "*.bin"
+          
+          # 检查是否有亚瑟的固件
+          if [ -z "$(find bin/ -name "*jdcloud_re-ss-01*squashfs*.bin")" ]; then
+            echo "❌ 没有找到京东云亚瑟的固件文件！"
+            exit 1
+          fi
 
       - name: 整理固件文件
         run: |
           mkdir -p output
           
-          # 通用匹配，兼容所有分支的文件名格式
-          find bin/targets/ipq60xx/generic/ -name "*jdcloud_re-ss-01*squashfs*.bin" -exec cp {} output/ \;
+          # 复制所有亚瑟的固件文件
+          find bin/ -name "*jdcloud_re-ss-01*squashfs*.bin" -exec cp {} output/ \;
           
           cd output
           echo "编译完成时间: $(date '+%Y-%m-%d %H:%M:%S')" > build_info.txt
