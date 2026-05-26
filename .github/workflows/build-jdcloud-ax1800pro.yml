@@ -73,9 +73,9 @@ jobs:
         run: |
           # 基础配置（全编译类型共用）
           cat > .config << EOF
-          CONFIG_TARGET_ipq60xx=y
-          CONFIG_TARGET_ipq60xx_generic=y
-          CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y
+          CONFIG_TARGET_qualcommax=y
+          CONFIG_TARGET_qualcommax_ipq60xx=y
+          CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-ss-01=y
           CONFIG_TARGET_IMAGES_GZIP=y
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
           CONFIG_CCACHE=y
@@ -117,7 +117,7 @@ jobs:
           make defconfig
 
           # 严格验证设备配置
-          if ! grep -q "CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y" .config; then
+          if ! grep -q "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-ss-01=y" .config; then
             echo "❌ 致命错误：当前分支 ${{ steps.params.outputs.branch }} 不支持京东云亚瑟设备！"
             echo "请确认你使用的是 istoreos-24.10 或更高版本分支"
             exit 1
@@ -125,7 +125,7 @@ jobs:
 
           echo "✅ 设备配置验证通过"
           echo "=== 最终目标设备配置 ==="
-          grep -E 'CONFIG_TARGET_ipq60xx|CONFIG_TARGET.*DEVICE_jdcloud' .config
+          grep -E 'CONFIG_TARGET_qualcommax|CONFIG_TARGET.*DEVICE_jdcloud' .config
 
       - name: 预下载所有源码包
         run: |
@@ -153,7 +153,7 @@ jobs:
           mkdir -p output
 
           # 查找并复制所有京东云亚瑟的固件文件
-          find bin/targets/ipq60xx/generic/ -name "*jdcloud_re-ss-01*squashfs*.bin" -exec cp {} output/ \;
+          find bin/targets/qualcommax/ipq60xx/ -name "*jdcloud_re-ss-01*squashfs*.bin" -exec cp {} output/ \;
 
           # 验证输出目录非空
           if [ -z "$(ls -A output/ 2>/dev/null)" ]; then
