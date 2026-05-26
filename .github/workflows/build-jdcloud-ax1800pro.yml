@@ -3,12 +3,11 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: '编译分支'
+        description: '编译分支（仅24.10及以上支持亚瑟）'
         required: true
-        default: 'istoreos-23.05'
+        default: 'istoreos-24.10'
         type: choice
         options:
-          - istoreos-23.05
           - istoreos-24.10
       build_type:
         description: '编译类型'
@@ -21,14 +20,16 @@ on:
   repository_dispatch:
     types: [sync-completed]
 
+concurrency:
+  group: build-jdcloud-ax1800pro-${{ github.ref_name }}
+  cancel-in-progress: true
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # 开启详细编译日志
-  V: s
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -36,125 +37,142 @@ jobs:
         id: params
         run: |
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            echo "branch=${{ github.event.client_payload.branch }}" >> $GITHUB_OUTPUT
-            echo "build_type=${{ github.event.client_payload.build_type }}" >> $GITHUB_OUTPUT
+            echo "branch=istoreos-24.10" >> $GITHUB_OUTPUT
+            echo "build_type=full" >> $GITHUB_OUTPUT
           else
             echo "branch=${{ inputs.branch }}" >> $GITHUB_OUTPUT
             echo "build_type=${{ inputs.build_type }}" >> $GITHUB_OUTPUT
           fi
+
+      - name: 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          df -h
 
       - name: 检出代码
         uses: actions/checkout@v5
         with:
           ref: ${{ steps.params.outputs.branch }}
           fetch-depth: 0
-
-      - name: 检查系统资源
-        run: |
-          echo "=== CPU 信息 ==="
-          lscpu | grep -E 'CPU\(s\)|Thread\(s\) per core|Core\(s\) per socket'
-          echo "=== 内存信息 ==="
-          free -h
-          echo "=== 磁盘信息 ==="
-          df -h
+          submodules: true
 
       - name: 安装编译依赖
         run: |
           sudo apt update -y
           sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-          gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
+          gettext git libncurses5-dev libssl-dev python3-setuptools rsync unzip zlib1g-dev \
           file wget curl python3-pip libelf-dev ccache
+          ccache --max-size 2G
 
       - name: 更新并安装 feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 验证配置文件
+      - name: 生成并验证配置文件
         run: |
+          # 基础配置（全编译类型共用）
           cat > .config << EOF
           CONFIG_TARGET_ipq60xx=y
           CONFIG_TARGET_ipq60xx_generic=y
           CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y
           CONFIG_TARGET_IMAGES_GZIP=y
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
-          
+          CONFIG_CCACHE=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-base=y
+          CONFIG_PACKAGE_luci-mod-admin-full=y
+          EOF
+
+          # 根据编译类型添加额外包
+          if [ "${{ steps.params.outputs.build_type }}" = "full" ]; then
+            cat >> .config << EOF
           # iStoreOS 核心组件
           CONFIG_PACKAGE_luci-app-istore=y
           CONFIG_PACKAGE_luci-app-istorex=y
           CONFIG_PACKAGE_luci-app-dockerman=y
-          
-          # Docker 支持
+
+          # Docker 完整支持
           CONFIG_PACKAGE_kmod-docker=y
           CONFIG_PACKAGE_kmod-overlay=y
           CONFIG_PACKAGE_kmod-br-netfilter=y
           CONFIG_PACKAGE_kmod-ipt-extra=y
-          
-          # WireGuard VPN 完整支持
+          CONFIG_PACKAGE_kmod-ipt-nat6=y
+          CONFIG_PACKAGE_kmod-ipt-conntrack=y
+
+          # WireGuard VPN
           CONFIG_PACKAGE_luci-app-wireguard=y
           CONFIG_PACKAGE_kmod-wireguard=y
           CONFIG_PACKAGE_wireguard-tools=y
           CONFIG_PACKAGE_luci-proto-wireguard=y
-          
+
           # 基础网络组件
           CONFIG_PACKAGE_luci-app-turboacc=y
           CONFIG_PACKAGE_luci-app-upnp=y
           CONFIG_PACKAGE_luci-app-ddns=y
           EOF
-          
-          # 验证配置并补全默认值
+          fi
+
+          # 补全所有默认配置
           make defconfig
-          
-          # 检查目标设备是否正确配置
-          echo "=== 目标设备配置 ==="
+
+          # 严格验证设备配置
+          if ! grep -q "CONFIG_TARGET_ipq60xx_generic_DEVICE_jdcloud_re-ss-01=y" .config; then
+            echo "❌ 致命错误：当前分支 ${{ steps.params.outputs.branch }} 不支持京东云亚瑟设备！"
+            echo "请确认你使用的是 istoreos-24.10 或更高版本分支"
+            exit 1
+          fi
+
+          echo "✅ 设备配置验证通过"
+          echo "=== 最终目标设备配置 ==="
           grep -E 'CONFIG_TARGET_ipq60xx|CONFIG_TARGET.*DEVICE_jdcloud' .config
 
       - name: 预下载所有源码包
         run: |
-          make download -j8
-          # 检查是否有下载失败的包
-          if [ $? -ne 0 ]; then
-            echo "❌ 源码包下载失败，正在重试..."
-            make download -j4
+          if ! make download -j8; then
+            echo "⚠️  部分源码包下载失败，正在单线程重试..."
+            make download -j1
           fi
 
-      - name: 开始编译（单线程，避免内存不足）
+      - name: 开始编译
         run: |
-          # 先使用单线程编译，避免GitHub Actions内存不足导致失败
-          make -j1 V=s
-          
-          # 检查编译是否成功
-          if [ $? -ne 0 ]; then
-            echo "❌ 编译失败！"
-            exit 1
+          if ! make -j2 V=s; then
+            exit_code=$?
+            echo "❌ 编译失败（退出码: $exit_code）"
+            echo "=== 最近编译日志 ==="
+            find build_dir -maxdepth 3 -name "*.log" -o -name "logs/*" 2>/dev/null | head -5 | while read log; do
+              echo "--- $log ---"
+              tail -50 "$log"
+            done
+            exit $exit_code
           fi
+          echo "✅ 编译成功"
 
-      - name: 检查生成的固件文件
-        run: |
-          echo "=== 所有生成的目标文件 ==="
-          find bin/ -type f -name "*.bin"
-          
-          # 检查是否有亚瑟的固件
-          if [ -z "$(find bin/ -name "*jdcloud_re-ss-01*squashfs*.bin")" ]; then
-            echo "❌ 没有找到京东云亚瑟的固件文件！"
-            exit 1
-          fi
-
-      - name: 整理固件文件
+      - name: 检查并整理固件
         run: |
           mkdir -p output
-          
-          # 复制所有亚瑟的固件文件
-          find bin/ -name "*jdcloud_re-ss-01*squashfs*.bin" -exec cp {} output/ \;
-          
-          cd output
-          echo "编译完成时间: $(date '+%Y-%m-%d %H:%M:%S')" > build_info.txt
-          echo "分支: ${{ steps.params.outputs.branch }}" >> build_info.txt
-          echo "设备: 京东云亚瑟AX1800 Pro (RE-SS-01)" >> build_info.txt
-          echo "编译类型: ${{ steps.params.outputs.build_type }}" >> build_info.txt
-          
-          echo "=== 最终生成的固件文件 ==="
-          ls -la
+
+          # 查找并复制所有京东云亚瑟的固件文件
+          find bin/targets/ipq60xx/generic/ -name "*jdcloud_re-ss-01*squashfs*.bin" -exec cp {} output/ \;
+
+          # 验证输出目录非空
+          if [ -z "$(ls -A output/ 2>/dev/null)" ]; then
+            echo "❌ 没有找到生成的固件文件！"
+            echo "bin目录下的所有bin文件："
+            find bin/ -type f -name "*.bin"
+            exit 1
+          fi
+
+          # 生成编译信息文件
+          {
+            echo "编译完成时间: $(date '+%Y-%m-%d %H:%M:%S')"
+            echo "分支: ${{ steps.params.outputs.branch }}"
+            echo "设备: 京东云亚瑟AX1800 Pro (RE-SS-01)"
+            echo "编译类型: ${{ steps.params.outputs.build_type }}"
+          } > output/build_info.txt
+
+          echo "✅ 编译成功！生成的固件文件："
+          ls -lh output/
 
       - name: 上传固件到 GitHub Releases
         uses: softprops/action-gh-release@v2
